@@ -21,7 +21,7 @@ jobs:
     - name: push to registry
       run: |
         VERSION=$(docker run --rm -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest get current-version --no-snapshot | sed 's/v//g')
-        docker tag slack-user-cache docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:$(git rev-parse --short HEAD)
+        docker tag pod-watcher docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:$(git rev-parse --short HEAD)
         docker tag pod-watcher docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:$VERSION
         docker tag pod-watcher docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:latest
         docker push docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:$(git rev-parse --short HEAD)
