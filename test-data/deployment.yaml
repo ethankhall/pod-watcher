@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example
+  labels:
+    app: example-deploy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example-deploy
+  template:
+    metadata:
+      labels:
+        app: example-deploy
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+      - name: container1
+        image: ubuntu:latest
+        command: ["/bin/sh"]
+        args: [ "-c", "while [ ! -f /tmp/exit ]; do sleep 1; done" ]
+      - name: container2
+        image: ubuntu:latest
+        command: ["/bin/sh"]
+        args: [ "-c", "while [ ! -f /tmp/exit ]; do sleep 1; done" ]
+      - name: container3
+        image: ubuntu:latest
+        command: ["/bin/sh"]
+        args: [ "-c", "while [ ! -f /tmp/exit ]; do sleep 1; done" ]

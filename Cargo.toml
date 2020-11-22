@@ -1,0 +1,22 @@
+[package]
+name = "pod-watcher"
+version = "0.1.0"
+authors = ["Ethan Hall <ethan@hall.sh>"]
+edition = "2018"
+
+[dependencies]
+clap = { git = "https://github.com/clap-rs/clap/", tag = "v3.0.0-beta.2" }
+tokio = { version = "0.2", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dotenv = "0.15"
+log = "0.4"
+slog = { version = "2.5", features = ["max_level_trace", "release_max_level_warn"] }
+slog-term = "2.5"
+slog-async = "2.5"
+slog-stdlog = "4.1"
+slog-scope = "4.3"
+error-chain = "0.12"
+kube = { version = "0.42.0", default-features = false, features = ["rustls-tls"] }
+kube-runtime = { version = "0.42.0", default-features = false, features = ["rustls-tls"] }
+k8s-openapi = { version = "0.9.0", features = ["v1_17"] }

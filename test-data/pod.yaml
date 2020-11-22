@@ -1,0 +1,20 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example
+spec:
+  terminationGracePeriodSeconds: 2
+  containers:
+  - name: container1
+    image: ubuntu:latest
+    command: ["/bin/sh"]
+    args: [ "-c", "while [ ! -f /tmp/exit ]; do sleep 1; done" ]
+  - name: container2
+    image: ubuntu:latest
+    command: ["/bin/sh"]
+    args: [ "-c", "while [ ! -f /tmp/exit ]; do sleep 1; done" ]
+  - name: container3
+    image: ubuntu:latest
+    command: ["/bin/sh"]
+    args: [ "-c", "while [ ! -f /tmp/exit ]; do sleep 1; done" ]
