@@ -13,7 +13,7 @@ RUN rm ./target/release/deps/pod_watcher*
 RUN cargo build --release
 
 # Verify that the CLI is accessable
-RUN /pod-watcher/target/release/pod-watcher web --help
+RUN /pod-watcher/target/release/pod-watcher --help
 
 FROM debian:buster-slim as tmp
 

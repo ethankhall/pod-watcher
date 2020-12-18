@@ -1,18 +1,14 @@
+mod delete;
 mod errors;
+mod istio;
 
+use async_trait::async_trait;
 use clap::Clap;
 use dotenv::dotenv;
 use slog::{debug, error, info, o, trace, warn, Filter, Level, Logger};
 
-use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
-use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::{
-    api::{Api, DeleteParams, Meta},
-    Client,
-};
+use kube::{api::Api, Client};
 
 #[derive(Clap, Debug)]
 pub struct LoggingOpts {
@@ -32,10 +28,59 @@ pub struct LoggingOpts {
 #[derive(Clap, Debug)]
 #[clap(author, about, version)]
 struct Opts {
-    #[clap(flatten)]
-    watcher_args: WatcherArgs,
+    #[clap(subcommand)]
+    subcmd: SubCommand,
     #[clap(flatten)]
     logging_opts: LoggingOpts,
+}
+
+#[derive(Clap, Debug)]
+enum SubCommand {
+    /// Delete the pod when the condition is met
+    DeletePod(DeletePod),
+
+    /// Send the exit command to Istio Proxy having it exit
+    StopIstio(StopIstio),
+}
+
+impl SubCommand {
+    fn get_watcher_args(&self) -> &WatcherArgs {
+        match self {
+            SubCommand::DeletePod(d) => &d.watcher_args,
+            SubCommand::StopIstio(s) => &s.watcher_args,
+        }
+    }
+}
+
+#[async_trait]
+trait OnExit {
+    async fn handle_exit(&self, logger: &Logger, pod: Pod) -> Result<(), crate::errors::Error>;
+}
+
+#[derive(Clap, Debug)]
+pub struct DeletePod {
+    #[clap(flatten)]
+    watcher_args: WatcherArgs,
+}
+
+#[async_trait]
+impl OnExit for DeletePod {
+    async fn handle_exit(&self, logger: &Logger, pod: Pod) -> Result<(), crate::errors::Error> {
+        Ok(delete::delete_pod(&logger, &self.watcher_args.pod_namespace, pod).await?)
+    }
+}
+
+#[derive(Clap, Debug)]
+pub struct StopIstio {
+    #[clap(flatten)]
+    watcher_args: WatcherArgs,
+}
+
+#[async_trait]
+impl OnExit for StopIstio {
+    async fn handle_exit(&self, logger: &Logger, _pod: Pod) -> Result<(), crate::errors::Error> {
+        Ok(istio::stop_istio(&logger).await?)
+    }
 }
 
 #[derive(Clap, Debug, PartialEq)]
@@ -91,7 +136,7 @@ async fn main() {
     // register slog_stdlog as the log handler with the log crate
     slog_stdlog::init().unwrap();
 
-    let result = match watch_k8s(log.new(o!()), opts).await {
+    let result = match watch_k8s(log.new(o!()), opts.subcmd).await {
         Ok(_) => 0,
         Err(e) => {
             error!(log, "Unrecoverable error!"; "error" => e.to_string());
@@ -108,12 +153,10 @@ pub fn module_and_line(record: &slog::Record) -> String {
     format!("{}:{}", record.module(), record.line())
 }
 
-async fn watch_k8s(logger: Logger, opts: Opts) -> Result<(), errors::kubernetes::Error> {
-    let pod: Pod = get_pod_status(
-        &opts.watcher_args.pod_namespace,
-        &opts.watcher_args.pod_name,
-    )
-    .await?;
+async fn watch_k8s(logger: Logger, opts: SubCommand) -> Result<(), errors::kubernetes::Error> {
+    let watcher_args = opts.get_watcher_args();
+
+    let pod: Pod = get_pod_status(&watcher_args.pod_namespace, &watcher_args.pod_name).await?;
     let phase = pod
         .clone()
         .status
@@ -123,139 +166,24 @@ async fn watch_k8s(logger: Logger, opts: Opts) -> Result<(), errors::kubernetes:
     debug!(
         logger,
         "Found pod {namespace}/{name}, current status {phase:?}",
-        namespace = &opts.watcher_args.pod_namespace,
-        name = &opts.watcher_args.pod_name,
+        namespace = &watcher_args.pod_namespace,
+        name = &watcher_args.pod_name,
         phase = &phase,
     );
 
-    let pod_name = format!(
-        "{}/{}",
-        &opts.watcher_args.pod_namespace, &opts.watcher_args.pod_name
-    );
+    let pod_name = format!("{}/{}", &watcher_args.pod_namespace, &watcher_args.pod_name);
 
     let new_logger = logger.new(o!("task" => "wait_for_crit", "pod" => pod_name.clone()));
-    wait_for_critical_pod_to_exit(new_logger, &opts.watcher_args).await?;
+    wait_for_critical_pod_to_exit(new_logger, &watcher_args).await?;
 
     let new_logger = logger.new(o!("task" => "kill_pod", "pod" => pod_name));
 
-    info!(new_logger, "Killing pod");
-    delete_pod(&new_logger, &opts.watcher_args.pod_namespace, pod).await?;
+    info!(new_logger, "Stopping pod");
+    delete::delete_pod(&new_logger, &watcher_args.pod_namespace, pod).await?;
 
     // If this code is running inside the pod it's trying to kill, will never get here
-    info!(new_logger, "Pod Killed");
+    info!(new_logger, "Dependencies stopped");
     Ok(())
-}
-
-enum KnownResource {
-    Pod(Pod),
-    Job(Job),
-    ReplicaSet(ReplicaSet),
-    Deployment(Deployment),
-}
-
-async fn delete_pod(
-    logger: &Logger,
-    namespace: &str,
-    pod: Pod,
-) -> Result<(), errors::kubernetes::Error> {
-    let mut owner_refs = get_owners(&pod.meta());
-    let mut delete_order: Vec<KnownResource> = Vec::new();
-    delete_order.push(KnownResource::Pod(pod));
-
-    while !owner_refs.is_empty() {
-        let owner = owner_refs.pop().unwrap();
-
-        let client = Client::try_default().await?;
-        match owner.kind.as_str() {
-            "ReplicaSet" => {
-                let replica_set: Api<ReplicaSet> = Api::namespaced(client, &namespace);
-                let target = replica_set.get(&owner.name).await?;
-                for super_owner in get_owners(target.meta()) {
-                    owner_refs.insert(0, super_owner);
-                }
-                delete_order.push(KnownResource::ReplicaSet(target));
-            }
-            "Job" => {
-                let job: Api<Job> = Api::namespaced(client, &namespace);
-                let target = job.get(&owner.name).await?;
-                for super_owner in get_owners(target.meta()) {
-                    owner_refs.insert(0, super_owner);
-                }
-                delete_order.push(KnownResource::Job(target));
-            }
-            "Deployment" => {
-                let deployment: Api<Deployment> = Api::namespaced(client, &namespace);
-                let target = deployment.get(&owner.name).await?;
-                for super_owner in get_owners(target.meta()) {
-                    owner_refs.insert(0, super_owner);
-                }
-                delete_order.push(KnownResource::Deployment(target));
-            }
-            _ => {
-                error!(
-                    logger,
-                    "Unknown resource type: {}/{}. Unable to delete it!",
-                    owner.api_version,
-                    owner.kind
-                );
-                break;
-            }
-        }
-    }
-
-    delete_order.reverse();
-
-    for target in delete_order {
-        match target {
-            KnownResource::Pod(target) => {
-                delete_resource(logger, target).await?;
-            }
-            KnownResource::Job(target) => {
-                delete_resource(logger, target).await?;
-            }
-            KnownResource::ReplicaSet(target) => {
-                delete_resource(logger, target).await?;
-            }
-            KnownResource::Deployment(target) => {
-                delete_resource(logger, target).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn delete_resource<T>(logger: &Logger, target: T) -> Result<(), errors::kubernetes::Error>
-where
-    T: k8s_openapi::Resource + Clone + serde::de::DeserializeOwned + Meta,
-{
-    let client = Client::try_default().await?;
-    let metadata = target.meta().clone();
-    let namespace = &metadata.namespace.unwrap();
-    let name = &metadata.name.unwrap();
-
-    let resource_name = std::any::type_name::<T>().to_string();
-    let last_path = resource_name.rfind(":").map(|x| x + 1).unwrap_or(0);
-    let resource_name = resource_name[(last_path)..].to_string();
-
-    info!(logger, "Deleting {} {}/{}", resource_name, namespace, &name);
-    let api: Api<T> = Api::namespaced(client, namespace);
-    api.delete(&name, &DeleteParams::default()).await?;
-    Ok(())
-}
-
-fn get_owners(metadata: &ObjectMeta) -> Vec<OwnerReference> {
-    match &metadata.owner_references {
-        None => Vec::new(),
-        Some(refs) => {
-            let mut owner_refs = Vec::new();
-            for a_ref in refs {
-                if a_ref.controller.unwrap_or_default() {
-                    owner_refs.push(a_ref.clone());
-                }
-            }
-            owner_refs
-        }
-    }
 }
 
 async fn wait_for_critical_pod_to_exit(
