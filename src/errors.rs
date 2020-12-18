@@ -28,7 +28,6 @@ pub mod kubernetes {
     }
 }
 
-
 pub mod reqwest {
     use error_chain::error_chain;
 

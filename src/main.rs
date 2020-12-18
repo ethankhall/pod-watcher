@@ -1,17 +1,14 @@
-mod errors;
 mod delete;
+mod errors;
 mod istio;
 
+use async_trait::async_trait;
 use clap::Clap;
 use dotenv::dotenv;
 use slog::{debug, error, info, o, trace, warn, Filter, Level, Logger};
-use async_trait::async_trait;
 
 use k8s_openapi::api::core::v1::Pod;
-use kube::{
-    api::{Api},
-    Client,
-};
+use kube::{api::Api, Client};
 
 #[derive(Clap, Debug)]
 pub struct LoggingOpts {
@@ -43,14 +40,14 @@ enum SubCommand {
     DeletePod(DeletePod),
 
     /// Send the exit command to Istio Proxy having it exit
-    StopIstio(StopIstio)
+    StopIstio(StopIstio),
 }
 
 impl SubCommand {
     fn get_watcher_args<'a>(&'a self) -> &WatcherArgs {
         match self {
             SubCommand::DeletePod(d) => &d.watcher_args,
-            SubCommand::StopIstio(s) => &s.watcher_args
+            SubCommand::StopIstio(s) => &s.watcher_args,
         }
     }
 }
@@ -158,12 +155,8 @@ pub fn module_and_line(record: &slog::Record) -> String {
 
 async fn watch_k8s(logger: Logger, opts: SubCommand) -> Result<(), errors::kubernetes::Error> {
     let watcher_args = opts.get_watcher_args();
-    
-    let pod: Pod = get_pod_status(
-        &watcher_args.pod_namespace,
-        &watcher_args.pod_name,
-    )
-    .await?;
+
+    let pod: Pod = get_pod_status(&watcher_args.pod_namespace, &watcher_args.pod_name).await?;
     let phase = pod
         .clone()
         .status
@@ -178,10 +171,7 @@ async fn watch_k8s(logger: Logger, opts: SubCommand) -> Result<(), errors::kuber
         phase = &phase,
     );
 
-    let pod_name = format!(
-        "{}/{}",
-        &watcher_args.pod_namespace, &watcher_args.pod_name
-    );
+    let pod_name = format!("{}/{}", &watcher_args.pod_namespace, &watcher_args.pod_name);
 
     let new_logger = logger.new(o!("task" => "wait_for_crit", "pod" => pod_name.clone()));
     wait_for_critical_pod_to_exit(new_logger, &watcher_args).await?;
