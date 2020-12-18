@@ -44,7 +44,7 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    fn get_watcher_args<'a>(&'a self) -> &WatcherArgs {
+    fn get_watcher_args(&self) -> &WatcherArgs {
         match self {
             SubCommand::DeletePod(d) => &d.watcher_args,
             SubCommand::StopIstio(s) => &s.watcher_args,

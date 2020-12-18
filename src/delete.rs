@@ -96,7 +96,7 @@ where
     let name = &metadata.name.unwrap();
 
     let resource_name = std::any::type_name::<T>().to_string();
-    let last_path = resource_name.rfind(":").map(|x| x + 1).unwrap_or(0);
+    let last_path = resource_name.rfind(':').map(|x| x + 1).unwrap_or(0);
     let resource_name = resource_name[(last_path)..].to_string();
 
     info!(logger, "Deleting {} {}/{}", resource_name, namespace, &name);
