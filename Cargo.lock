@@ -1199,6 +1199,7 @@ name = "pod-watcher"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "clap",
  "dotenv",
  "error-chain",

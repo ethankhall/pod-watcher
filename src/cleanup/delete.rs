@@ -1,6 +1,5 @@
-use slog::{error, info, Logger};
+use slog::{debug, info, Logger};
 
-use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -13,48 +12,36 @@ use kube::{
 type Result = std::result::Result<(), crate::errors::kubernetes::Error>;
 
 enum KnownResource {
-    Pod(Pod),
-    Job(Job),
-    ReplicaSet(ReplicaSet),
-    Deployment(Deployment),
+    Pod(Box<Pod>),
+    Job(Box<Job>),
 }
 
-pub async fn delete_pod(logger: &Logger, namespace: &str, pod: Pod) -> Result {
-    let mut owner_refs = get_owners(&pod.meta());
+pub async fn delete_pod(logger: &Logger, pod: &Pod) -> Result {
+    let meta = &pod.meta();
+    let namespace = match &meta.namespace {
+        Some(ns) => ns.clone(),
+        None => "default".to_string(),
+    };
+
+    let mut owner_refs = get_owners(meta);
     let mut delete_order: Vec<KnownResource> = Vec::new();
-    delete_order.push(KnownResource::Pod(pod));
+    delete_order.push(KnownResource::Pod(Box::new(pod.clone())));
 
     while !owner_refs.is_empty() {
         let owner = owner_refs.pop().unwrap();
 
         let client = Client::try_default().await?;
         match owner.kind.as_str() {
-            "ReplicaSet" => {
-                let replica_set: Api<ReplicaSet> = Api::namespaced(client, &namespace);
-                let target = replica_set.get(&owner.name).await?;
-                for super_owner in get_owners(target.meta()) {
-                    owner_refs.insert(0, super_owner);
-                }
-                delete_order.push(KnownResource::ReplicaSet(target));
-            }
             "Job" => {
                 let job: Api<Job> = Api::namespaced(client, &namespace);
                 let target = job.get(&owner.name).await?;
                 for super_owner in get_owners(target.meta()) {
                     owner_refs.insert(0, super_owner);
                 }
-                delete_order.push(KnownResource::Job(target));
-            }
-            "Deployment" => {
-                let deployment: Api<Deployment> = Api::namespaced(client, &namespace);
-                let target = deployment.get(&owner.name).await?;
-                for super_owner in get_owners(target.meta()) {
-                    owner_refs.insert(0, super_owner);
-                }
-                delete_order.push(KnownResource::Deployment(target));
+                delete_order.push(KnownResource::Job(Box::new(target)));
             }
             _ => {
-                error!(
+                debug!(
                     logger,
                     "Unknown resource type: {}/{}. Unable to delete it!",
                     owner.api_version,
@@ -75,18 +62,12 @@ pub async fn delete_pod(logger: &Logger, namespace: &str, pod: Pod) -> Result {
             KnownResource::Job(target) => {
                 delete_resource(logger, target).await?;
             }
-            KnownResource::ReplicaSet(target) => {
-                delete_resource(logger, target).await?;
-            }
-            KnownResource::Deployment(target) => {
-                delete_resource(logger, target).await?;
-            }
         }
     }
     Ok(())
 }
 
-async fn delete_resource<T>(logger: &Logger, target: T) -> Result
+async fn delete_resource<T>(logger: &Logger, target: Box<T>) -> Result
 where
     T: k8s_openapi::Resource + Clone + serde::de::DeserializeOwned + Meta,
 {

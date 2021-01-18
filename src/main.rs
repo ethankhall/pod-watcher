@@ -1,11 +1,14 @@
-mod delete;
+mod cleanup;
 mod errors;
-mod istio;
 
-use async_trait::async_trait;
+use chrono::prelude::*;
 use clap::Clap;
 use dotenv::dotenv;
 use slog::{debug, error, info, o, trace, warn, Filter, Level, Logger};
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+
+use tokio::time::delay_for;
 
 use k8s_openapi::api::core::v1::Pod;
 use kube::{api::Api, Client};
@@ -28,62 +31,13 @@ pub struct LoggingOpts {
 #[derive(Clap, Debug)]
 #[clap(author, about, version)]
 struct Opts {
-    #[clap(subcommand)]
-    subcmd: SubCommand,
+    #[clap(flatten)]
+    args: WatcherArgs,
     #[clap(flatten)]
     logging_opts: LoggingOpts,
 }
 
-#[derive(Clap, Debug)]
-enum SubCommand {
-    /// Delete the pod when the condition is met
-    DeletePod(DeletePod),
-
-    /// Send the exit command to Istio Proxy having it exit
-    StopIstio(StopIstio),
-}
-
-impl SubCommand {
-    fn get_watcher_args(&self) -> &WatcherArgs {
-        match self {
-            SubCommand::DeletePod(d) => &d.watcher_args,
-            SubCommand::StopIstio(s) => &s.watcher_args,
-        }
-    }
-}
-
-#[async_trait]
-trait OnExit {
-    async fn handle_exit(&self, logger: &Logger, pod: Pod) -> Result<(), crate::errors::Error>;
-}
-
-#[derive(Clap, Debug)]
-pub struct DeletePod {
-    #[clap(flatten)]
-    watcher_args: WatcherArgs,
-}
-
-#[async_trait]
-impl OnExit for DeletePod {
-    async fn handle_exit(&self, logger: &Logger, pod: Pod) -> Result<(), crate::errors::Error> {
-        Ok(delete::delete_pod(&logger, &self.watcher_args.pod_namespace, pod).await?)
-    }
-}
-
-#[derive(Clap, Debug)]
-pub struct StopIstio {
-    #[clap(flatten)]
-    watcher_args: WatcherArgs,
-}
-
-#[async_trait]
-impl OnExit for StopIstio {
-    async fn handle_exit(&self, logger: &Logger, _pod: Pod) -> Result<(), crate::errors::Error> {
-        Ok(istio::stop_istio(&logger).await?)
-    }
-}
-
-#[derive(Clap, Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum KillCondition {
     Any,
     All,
@@ -91,21 +45,16 @@ enum KillCondition {
 
 #[derive(Clap, Debug)]
 pub struct WatcherArgs {
-    /// Name of the pod to watch
-    #[clap(long, env = "POD_NAME")]
-    pub pod_name: String,
+    /// Name of the Istio Container inside the Pod.
+    /// When the container is found, it will be shut down nicely.
+    #[clap(long, default_value = "istio-proxy", env = "ISTIO_CONTAINER_NAME")]
+    istio_container_name: String,
 
-    /// Namespace of the pod to watch
-    #[clap(long, env = "POD_NAMESPACE")]
-    pub pod_namespace: String,
+    #[clap(long, default_value = "5000", env = "ISTIO_DEADLINE")]
+    istio_deadline_ms: u32,
 
-    /// When should the pod be killed? If set to any, if any of the critical containers
-    /// are terminated, the pod will be killed. When set to `all` all the containers
-    /// must be terminated at the same time.
-    #[clap(name = "when", long, arg_enum, default_value = "any")]
-    kill_condition: KillCondition,
-
-    pub critical_containers: Vec<String>,
+    #[clap(long, default_value = "1000", env = "CONTAINER_DEADLINE")]
+    critical_deadline: i64,
 }
 
 #[tokio::main]
@@ -136,7 +85,7 @@ async fn main() {
     // register slog_stdlog as the log handler with the log crate
     slog_stdlog::init().unwrap();
 
-    let result = match watch_k8s(log.new(o!()), opts.subcmd).await {
+    let result = match watch_k8s(log.new(o!()), &opts.args).await {
         Ok(_) => 0,
         Err(e) => {
             error!(log, "Unrecoverable error!"; "error" => e.to_string());
@@ -153,148 +102,228 @@ pub fn module_and_line(record: &slog::Record) -> String {
     format!("{}:{}", record.module(), record.line())
 }
 
-async fn watch_k8s(logger: Logger, opts: SubCommand) -> Result<(), errors::kubernetes::Error> {
-    let watcher_args = opts.get_watcher_args();
-
-    let pod: Pod = get_pod_status(&watcher_args.pod_namespace, &watcher_args.pod_name).await?;
-    let phase = pod
-        .clone()
-        .status
-        .and_then(|status| status.phase)
-        .unwrap_or_else(|| "None".to_string());
-
-    debug!(
-        logger,
-        "Found pod {namespace}/{name}, current status {phase:?}",
-        namespace = &watcher_args.pod_namespace,
-        name = &watcher_args.pod_name,
-        phase = &phase,
-    );
-
-    let pod_name = format!("{}/{}", &watcher_args.pod_namespace, &watcher_args.pod_name);
-
-    let new_logger = logger.new(o!("task" => "wait_for_crit", "pod" => pod_name.clone()));
-    wait_for_critical_pod_to_exit(new_logger, &watcher_args).await?;
-
-    let new_logger = logger.new(o!("task" => "kill_pod", "pod" => pod_name));
-
-    info!(new_logger, "Stopping pod");
-    delete::delete_pod(&new_logger, &watcher_args.pod_namespace, pod).await?;
-
-    // If this code is running inside the pod it's trying to kill, will never get here
-    info!(new_logger, "Dependencies stopped");
-    Ok(())
-}
-
-async fn wait_for_critical_pod_to_exit(
-    logger: Logger,
-    args: &WatcherArgs,
-) -> Result<(), errors::kubernetes::Error> {
-    use tokio::time::{delay_for, Duration};
+async fn watch_k8s(logger: Logger, opts: &WatcherArgs) -> Result<(), errors::kubernetes::Error> {
+    let cleanup = cleanup::CleanupPod::new(&opts.istio_container_name, opts.istio_deadline_ms);
+    let mut pods_being_deleted: BTreeMap<String, i64> = BTreeMap::new();
 
     loop {
-        let should_kill_pod = match get_pod_status(&args.pod_namespace, &args.pod_name).await {
-            Ok(pod) => are_critical_pods_dead(&logger, &pod, &args),
-            Err(e) => {
-                warn!(logger, "Unable to get details about pod. Ignoring error.";
-                    "error" => e.to_string()
+        info!(logger, "Fetching pod statuses");
+        let watched_pods = get_pods_status(&logger).await?;
+        for pod_container in watched_pods {
+            let uid = match &pod_container.pod.metadata.uid {
+                Some(uuid) => uuid.to_string(),
+                None => continue,
+            };
+
+            if pods_being_deleted.contains_key(&uid) {
+                debug!(pod_container.logger, "Ignoring pod as it's being deleted.");
+                continue;
+            }
+
+            {
+                let pod_container = pod_container.clone();
+                let critical_containers = &pod_container.critical_containers;
+                let critical_containers = critical_containers.join(",");
+                info!(
+                    pod_container.logger,
+                    "Processing pod {critical_containers:?}",
+                    critical_containers = &critical_containers
                 );
-                false
+            };
+
+            if pod_container.should_be_terminated(&opts.critical_deadline) {
+                if let Err(e) = cleanup
+                    .cleanup_pod(&pod_container.logger, &pod_container.pod)
+                    .await
+                {
+                    error!(pod_container.logger, "There was an error while trying to delete Pos."; "error" => %e);
+                }
+
+                pods_being_deleted
+                    .entry(uid)
+                    .or_insert(Utc::now().timestamp_millis() + 10_000);
+            }
+        }
+
+        delay_for(Duration::from_secs(5)).await;
+
+        let now = Utc::now().timestamp_millis();
+
+        let mut keys_to_remove = Vec::new();
+
+        for key in pods_being_deleted.keys() {
+            if pods_being_deleted.get(key).unwrap_or(&0) < &now {
+                keys_to_remove.push(key.clone());
+            }
+        }
+
+        for key in keys_to_remove {
+            pods_being_deleted.remove(&key);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PodContainer {
+    pod: Pod,
+    name: String,
+    namespace: String,
+    logger: Logger,
+    condition: KillCondition,
+    critical_containers: Vec<String>,
+}
+
+impl PodContainer {
+    fn should_be_terminated(&self, crit_deadline: &i64) -> bool {
+        trace!(self.logger, "Pods current status: {:?}", &self.pod.status);
+
+        let container_statuses = match &self.pod.status {
+            None => {
+                warn!(
+                    self.logger,
+                    "Pod didn't return a status, assuming everything is running"
+                );
+                return false;
+            }
+            Some(status) => &status.container_statuses,
+        };
+
+        let container_statuses = match container_statuses {
+            Some(container_statuses) => container_statuses,
+            None => {
+                warn!(
+                    self.logger,
+                    "Pod didn't return a container_statuses, assuming everything is running"
+                );
+                return false;
             }
         };
 
-        if should_kill_pod {
-            info!(logger, "Critical container(s) is/are died! Killing pod!",);
-            break;
+        let mut critical_containers: BTreeSet<String> = BTreeSet::new();
+        for container in &self.critical_containers {
+            critical_containers.insert(container.clone());
         }
 
-        trace!(logger, "waiting for next tick");
-        delay_for(Duration::from_millis(100)).await;
-    }
-
-    Ok(())
-}
-
-fn are_critical_pods_dead(logger: &Logger, pod: &Pod, args: &WatcherArgs) -> bool {
-    use std::collections::BTreeSet;
-    trace!(logger, "Pods current status: {:?}", &pod.status);
-
-    let container_statuses = match &pod.status {
-        None => {
-            warn!(
-                logger,
-                "Pod didn't return a status, assuming everything is running"
+        let mut critical_containers_dead = 0;
+        for status in container_statuses {
+            trace!(
+                self.logger,
+                "Critical containers: {:?}",
+                &critical_containers
             );
-            return false;
-        }
-        Some(status) => &status.container_statuses,
-    };
+            trace!(self.logger, "Processing container {}", &status.name);
+            if critical_containers.contains(&status.name) {
+                match &status.state {
+                    Some(state) => {
+                        if let Some(terminated) = &state.terminated {
+                            let past_deadline = match &terminated.finished_at {
+                                Some(time) => {
+                                    time.0.timestamp_millis() + crit_deadline
+                                        > Utc::now().timestamp_millis()
+                                }
+                                None => true,
+                            };
 
-    let container_statuses = match container_statuses {
-        Some(container_statuses) => container_statuses,
-        None => {
-            warn!(
-                logger,
-                "Pod didn't return a container_statuses, assuming everything is running"
-            );
-            return false;
-        }
-    };
-
-    let mut critical_containers: BTreeSet<String> = BTreeSet::new();
-    for container in &args.critical_containers {
-        critical_containers.insert(container.clone());
-    }
-
-    let mut critical_containers_dead = 0;
-    for status in container_statuses {
-        trace!(logger, "Critical containers: {:?}", &critical_containers);
-        trace!(logger, "Processing container {}", &status.name);
-        if critical_containers.contains(&status.name) {
-            match &status.state {
-                Some(state) => {
-                    if let Some(terminated) = &state.terminated {
-                        info!(logger, "Critical container {name} has exited!",
-                         name = &status.name;
-                         "terminated" => to_json(&terminated)
+                            if past_deadline {
+                                critical_containers_dead += 1;
+                                info!(self.logger, "Critical container {name} has exited, and deadline passed!",
+                                 name = &status.name;
+                                 "terminated" => to_json(&terminated)
+                                );
+                            } else {
+                                info!(self.logger, "Critical container {name} has exited, but hasn't passed the deadline.", name = &status.name; "terminated" => to_json(&terminated));
+                            }
+                        }
+                    }
+                    None => {
+                        warn!(
+                            self.logger,
+                            "Critical container {name} didn't return a status, assuming it's ok",
+                            name = &status.name
                         );
-                        critical_containers_dead += 1;
                     }
                 }
-                None => {
-                    warn!(
-                        logger,
-                        "Critical container {name} didn't return a status, assuming it's ok",
-                        name = &status.name
-                    );
-                }
+                critical_containers.remove(&status.name);
             }
-            critical_containers.remove(&status.name);
         }
-    }
 
-    if !critical_containers.is_empty() {
-        warn!(
-            logger,
-            "Unable to find critical container(s): {}",
-            critical_containers
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
+        if !critical_containers.is_empty() {
+            warn!(
+                self.logger,
+                "Unable to find critical container(s): {}",
+                critical_containers
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
 
-    match args.kill_condition {
-        KillCondition::Any => critical_containers_dead != 0,
-        KillCondition::All => critical_containers_dead == args.critical_containers.len(),
+        match self.condition {
+            KillCondition::Any => critical_containers_dead != 0,
+            KillCondition::All => critical_containers_dead == self.critical_containers.len(),
+        }
     }
 }
 
-async fn get_pod_status(namespace: &str, pod_name: &str) -> Result<Pod, errors::kubernetes::Error> {
+async fn get_pods_status(logger: &Logger) -> Result<Vec<PodContainer>, errors::kubernetes::Error> {
+    use kube::api::ListParams;
+
     let client = Client::try_default().await?;
-    let pods: Api<Pod> = Api::namespaced(client, namespace);
-    let pod: Pod = pods.get(pod_name).await?;
-    Ok(pod)
+    let pods: Api<Pod> = Api::all(client);
+    let pods = pods.list(&ListParams::default()).await?;
+
+    let watched_pods: Vec<PodContainer> = pods
+        .items
+        .into_iter()
+        .filter(|pod| {
+            if pod.metadata.name.is_none() || pod.metadata.namespace.is_none() {
+                return false;
+            }
+            match &pod.metadata.annotations {
+                Some(annotation) => annotation.contains_key("podwatcher/critical-containers"),
+                None => false,
+            }
+        })
+        .map(|pod| {
+            let name = pod.metadata.name.clone().unwrap();
+            let namespace = pod.metadata.namespace.clone().unwrap();
+            let annotations = pod.metadata.annotations.clone().unwrap();
+            let critial_annotation: &String =
+                annotations.get("podwatcher/critical-containers").unwrap();
+            let critical_containers = critial_annotation
+                .replace(" ", "")
+                .split('.')
+                .map(|x| x.to_string())
+                .collect();
+
+            let logger = logger.new(o!("path" => format!("{}/{}", namespace, name)));
+
+            let default_any = "any".to_string();
+            let condition = annotations
+                .get("podwatcher/condition")
+                .unwrap_or(&default_any);
+
+            let condition = match condition.to_lowercase().as_str() {
+                "any" | "" => KillCondition::Any,
+                "all" => KillCondition::All,
+                e => {
+                    warn!(logger, "Unable to parse {}, assuming any", e);
+                    KillCondition::Any
+                }
+            };
+
+            PodContainer {
+                pod,
+                name,
+                namespace,
+                logger,
+                condition,
+                critical_containers,
+            }
+        })
+        .collect();
+
+    Ok(watched_pods)
 }
 
 fn to_json<T>(input: &T) -> String

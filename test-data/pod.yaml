@@ -3,6 +3,8 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: example
+  annotations:
+    podwatcher/critical-containers: "container1,container2"
 spec:
   terminationGracePeriodSeconds: 2
   containers:
