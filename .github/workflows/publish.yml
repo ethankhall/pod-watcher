@@ -14,13 +14,15 @@ jobs:
       run: docker login docker.pkg.github.com --username ethankhall --password ${{ secrets.GITHUB_TOKEN }}
     - name: Build the Docker image
       run: |
+        set -e
         docker run --rm -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest tag next-release --local --github
-        VERSION=$(docker run --rm -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest get current-release | sed 's/v//g')
+        VERSION=$(docker run --rm -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest get latest | sed 's/v//g')
         docker run --rm -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest write-version latest
         docker build . --file Dockerfile --tag pod-watcher
     - name: push to registry
       run: |
-        VERSION=$(docker run --rm -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest get current-release | sed 's/v//g')
+        set -e
+        VERSION=$(docker run --rm -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest get latest | sed 's/v//g')
         docker tag pod-watcher docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:$(git rev-parse --short HEAD)
         docker tag pod-watcher docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:$VERSION
         docker tag pod-watcher docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:latest
