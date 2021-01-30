@@ -1,70 +1,24 @@
 # Pod Watcher
 
-This tool is intended to make it easier to have "sidecars" shut down
-when the "critical container" have exited.
+This tool is intended to help emulate the concept of "critical containers".
 
-This tool has two ways to exit, delete the pod or tell Istio to shutdown.
+That means that when a critical container inside a pod stops, this code
+will see that (after a timeout) and if the container doesn't restart, the
+pod will be deleted.
 
-## Delete Pod
+This tool requires that the pod be annotated with
+`podwatcher/critical-containers: "container1"` where the value is a comma
+seperated list.
 
-This is usually used when there is a Job with many different containers running,
-and those containers don't have a shutdown command.
+When there are multiple containers that are in the critical container list,
+you can choose if `any` or `all` containers need to have terminated. You can
+use `podwatcher/condition` to configure it. By default, `any` will be used.
 
-### Usage
+## Deployment
 
-```yaml
-spec:
-  containers:
-    ...
-    - name: pod-watcher
-      image: docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:latest
-      command: [ "/app/pod-watcher", "delete-pod", "job-container-name"]
-      resources:
-        request:
-          cpu: 10m
-          memory: 32Mi
-        limit:
-          cpu: 10m
-          memory: 128Mi
-      env:
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-```
+This project uses Kustomize for deployment, it's recommended to update the
+namespace. It will default to using `pod-watcher-system`, if you don't change
+it you'll need to create the namespace.
 
-## Stop Istio
-
-If you have a Job that has a primary container, and then an Istio container.
-When in this mode the Istio container will sent an HTTP command that will cause
-the pod to shutdown allowing the Job to finish successfully.
-
-### Usage
-
-```yaml
-  containers:
-    ...
-    - name: pod-watcher
-      image: docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:latest
-      command: [ "/app/pod-watcher", "stop-istio", "job-container-name"]
-      resources:
-        request:
-          cpu: 10m
-          memory: 32Mi
-        limit:
-          cpu: 10m
-          memory: 128Mi
-      env:
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-```
+A ClusterRole and ClusterRoleBinding will be created to allow the created
+ServiceAccount to access Pod and Jobs.s

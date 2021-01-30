@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-watcher
+rules:
+# Grant the ability to find pods that need to be monitored.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list", "delete"]
+
+# Allow Jobs to be deleted when the child pod is taken out.
+- apiGroups: ["batch", "extensions"]
+  resources: ["jobs"]
+  verbs: ["get", "delete"]

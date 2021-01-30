@@ -1,0 +1,8 @@
+namespace: pod-watcher-system
+resources:
+- watcher.ClusterRoleBinding.yaml
+- watcher.ClusterRole.yaml
+- watcher.Deployment.yaml
+- watcher.ServiceAccount.yaml
+commonLabels:
+  app: pod-watcher

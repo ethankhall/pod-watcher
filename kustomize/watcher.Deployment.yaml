@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-watcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pod-watcher
+  template:
+    metadata:
+      labels:
+        app: pod-watcher
+    spec:
+      serviceAccountName: pod-watcher
+      containers:
+      - name: pod-watcher
+        image: docker.pkg.github.com/ethankhall/pod-watcher/pod-watcher:0.2.4
