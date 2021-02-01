@@ -1,4 +1,4 @@
-FROM rust:1.47 as builder
+FROM rust:1.49 as builder
 
 RUN USER=root cargo new --bin pod-watcher
 WORKDIR /pod-watcher
@@ -6,10 +6,10 @@ COPY ./Cargo.toml ./Cargo.toml
 COPY ./Cargo.lock ./Cargo.lock
 RUN cargo build --release
 RUN rm src/*.rs
+RUN rm ./target/release/deps/pod_watcher*
 
 ADD . ./
 
-RUN rm ./target/release/deps/pod_watcher*
 RUN cargo build --release
 
 # Verify that the CLI is accessable
@@ -23,6 +23,7 @@ ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /tini
 RUN chmod +x /tini
 
 FROM debian:buster-slim
+RUN apt-get update && apt-get install -y openssl && apt-get clean
 ARG APP=/app
 
 ENV TZ=Etc/UTC \

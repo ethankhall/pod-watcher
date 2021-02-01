@@ -19,6 +19,7 @@ jobs:
         VERSION=$(docker run --rm -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest get latest | sed 's/v//g')
         docker run --rm -v $(pwd):/target docker.pkg.github.com/ethankhall/crom/cli:latest write-version latest
         docker build . --file Dockerfile --tag pod-watcher
+        docker run --rm pod-watcher /app/pod-watcher --help
     - name: push to registry
       run: |
         set -e

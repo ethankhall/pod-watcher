@@ -44,4 +44,6 @@ jobs:
     steps:
     - uses: actions/checkout@v1
     - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag slack-user-cache
+      run: docker build . --file Dockerfile --tag pod-watcher
+    - name: Check help
+      run: docker run --rm pod-watcher /app/pod-watcher --help
