@@ -76,7 +76,7 @@ async fn main() {
     );
     let shared_logger = log.new(slog::o!());
 
-    debug!(log, "Starting up....");
+    info!(log, "Starting up....");
 
     // slog_stdlog uses the logger from slog_scope, so set a logger there
     let guard = slog_scope::set_global_logger(shared_logger);
