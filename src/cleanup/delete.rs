@@ -1,4 +1,4 @@
-use slog::{debug, info, Logger};
+use tracing::{debug, info};
 
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
@@ -16,7 +16,7 @@ enum KnownResource {
     Job(Box<Job>),
 }
 
-pub async fn delete_pod(logger: &Logger, pod: &Pod) -> Result {
+pub async fn delete_pod(pod: &Pod) -> Result {
     let meta = &pod.meta();
     let namespace = match &meta.namespace {
         Some(ns) => ns.clone(),
@@ -42,10 +42,8 @@ pub async fn delete_pod(logger: &Logger, pod: &Pod) -> Result {
             }
             _ => {
                 debug!(
-                    logger,
                     "Unknown resource type: {}/{}. Unable to delete it!",
-                    owner.api_version,
-                    owner.kind
+                    owner.api_version, owner.kind
                 );
                 break;
             }
@@ -57,17 +55,17 @@ pub async fn delete_pod(logger: &Logger, pod: &Pod) -> Result {
     for target in delete_order {
         match target {
             KnownResource::Pod(target) => {
-                delete_resource(logger, target).await?;
+                delete_resource(target).await?;
             }
             KnownResource::Job(target) => {
-                delete_resource(logger, target).await?;
+                delete_resource(target).await?;
             }
         }
     }
     Ok(())
 }
 
-async fn delete_resource<T>(logger: &Logger, target: Box<T>) -> Result
+async fn delete_resource<T>(target: Box<T>) -> Result
 where
     T: k8s_openapi::Resource + Clone + serde::de::DeserializeOwned + Meta,
 {
@@ -80,7 +78,7 @@ where
     let last_path = resource_name.rfind(':').map(|x| x + 1).unwrap_or(0);
     let resource_name = resource_name[(last_path)..].to_string();
 
-    info!(logger, "Deleting {} {}/{}", resource_name, namespace, &name);
+    info!("Deleting {} {}/{}", resource_name, namespace, &name);
     let api: Api<T> = Api::namespaced(client, namespace);
     api.delete(&name, &DeleteParams::default()).await?;
     Ok(())
