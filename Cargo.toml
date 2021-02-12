@@ -12,11 +12,8 @@ serde_json = "1.0"
 dotenv = "0.15"
 log = "0.4"
 async-trait = "0.1"
-slog = { version = "2.5", features = ["max_level_trace", "release_max_level_warn"] }
-slog-term = "2.5"
-slog-async = "2.5"
-slog-stdlog = "4.1"
-slog-scope = "4.3"
+tracing = { version = "0.1", features = ["max_level_trace", "release_max_level_debug"] }
+tracing-subscriber = "0.2"
 error-chain = "0.12"
 kube = { version = "0.42.0", default-features = false, features = ["rustls-tls"] }
 kube-runtime = { version = "0.42.0", default-features = false, features = ["rustls-tls"] }
